@@ -44,13 +44,14 @@
   </div>
 
   <div style="background: var(--color-background-info); border: 0.5px solid var(--color-border-info); border-radius: var(--border-radius-md); padding: 10px 12px; font-size: 12px; color: var(--color-text-info); line-height: 1.6;">
-    ⚠ <strong>必ずイヤホン/ヘッドフォンを使用してください。</strong> スピーカーで使うとマイクがループしてハウリングします。原理上、ソフトウェアの遅延（数ms〜数十ms）があるため、完全なキャンセルは困難ですが、定常的な低周波ノイズに効果的です。
+    ⚠ <strong>必ずイヤホン/ヘッドフォンを使用してください。</strong> スピーカーで使うとマイクがループしてハウリングします。
   </div>
 </div>
 
 <script>
-let ctx, sourceNode, invertNode, delayNode, analyzerIn, analyzerOut, stream;
+let audioCtx, sourceNode, invertNode, delayNode, analyzer, stream;
 let rafId;
+let currentGain = 1.0;
 
 const btnStart = document.getElementById('btn-start');
 const btnStop  = document.getElementById('btn-stop');
@@ -63,8 +64,9 @@ const cvsIn  = document.getElementById('cvs-in');
 const cvsOut = document.getElementById('cvs-out');
 
 gainSlider.oninput = () => {
-  gainVal.textContent = parseFloat(gainSlider.value).toFixed(2);
-  if (invertNode) invertNode.gain.value = -parseFloat(gainSlider.value);
+  currentGain = parseFloat(gainSlider.value);
+  gainVal.textContent = currentGain.toFixed(2);
+  if (invertNode) invertNode.gain.value = -currentGain;
 };
 delaySlider.oninput = () => {
   const ms = parseInt(delaySlider.value);
@@ -74,27 +76,25 @@ delaySlider.oninput = () => {
 
 async function startANC() {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-    ctx = new AudioContext();
-    sourceNode = ctx.createMediaStreamSource(stream);
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+    audioCtx = new AudioContext();
+    sourceNode = audioCtx.createMediaStreamSource(stream);
 
-    analyzerIn = ctx.createAnalyser();
-    analyzerIn.fftSize = 1024;
+    analyzer = audioCtx.createAnalyser();
+    analyzer.fftSize = 1024;
 
-    invertNode = ctx.createGain();
-    invertNode.gain.value = -parseFloat(gainSlider.value);
+    invertNode = audioCtx.createGain();
+    invertNode.gain.value = -currentGain;
 
-    delayNode = ctx.createDelay(0.2);
+    delayNode = audioCtx.createDelay(0.2);
     delayNode.delayTime.value = parseInt(delaySlider.value) / 1000;
 
-    analyzerOut = ctx.createAnalyser();
-    analyzerOut.fftSize = 1024;
-
-    sourceNode.connect(analyzerIn);
+    sourceNode.connect(analyzer);
     sourceNode.connect(invertNode);
     invertNode.connect(delayNode);
-    delayNode.connect(analyzerOut);
-    delayNode.connect(ctx.destination);
+    delayNode.connect(audioCtx.destination);
 
     badge.textContent = '● ACTIVE';
     badge.style.color = 'var(--color-text-success)';
@@ -113,57 +113,60 @@ async function startANC() {
 function stopANC() {
   if (rafId) cancelAnimationFrame(rafId);
   if (stream) stream.getTracks().forEach(t => t.stop());
-  if (ctx) ctx.close();
-  ctx = sourceNode = invertNode = delayNode = analyzerIn = analyzerOut = stream = null;
+  if (audioCtx) audioCtx.close();
+  audioCtx = sourceNode = invertNode = delayNode = analyzer = stream = null;
   badge.textContent = '● STANDBY';
   badge.style.color = 'var(--color-text-secondary)';
   badge.style.borderColor = 'var(--color-border-secondary)';
   badge.style.background = 'var(--color-background-secondary)';
   btnStart.disabled = false;
   btnStop.disabled = true;
-  clearCanvas(cvsIn);
-  clearCanvas(cvsOut);
+  drawBaseline(cvsIn);
+  drawBaseline(cvsOut);
 }
 
-function clearCanvas(c) {
+function drawBaseline(c) {
   const g = c.getContext('2d');
   g.clearRect(0, 0, c.width, c.height);
   g.strokeStyle = 'rgba(136,135,128,0.2)';
   g.lineWidth = 0.5;
-  g.beginPath(); g.moveTo(0, c.height/2); g.lineTo(c.width, c.height/2); g.stroke();
+  g.beginPath(); g.moveTo(0, c.height / 2); g.lineTo(c.width, c.height / 2); g.stroke();
 }
 
-function drawWave(canvas, analyzer, color) {
+function drawWave(canvas, buf, scale, color) {
   const g = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
-  g.clearRect(0,0,W,H);
+  g.clearRect(0, 0, W, H);
   g.strokeStyle = 'rgba(136,135,128,0.15)';
   g.lineWidth = 0.5;
-  g.beginPath(); g.moveTo(0,H/2); g.lineTo(W,H/2); g.stroke();
+  g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
 
-  const buf = new Float32Array(analyzer.fftSize);
-  analyzer.getFloatTimeDomainData(buf);
   g.strokeStyle = color;
   g.lineWidth = 1.5;
   g.beginPath();
   for (let i = 0; i < buf.length; i++) {
     const x = (i / buf.length) * W;
-    const y = H/2 - buf[i] * H * 0.42;
-    i === 0 ? g.moveTo(x,y) : g.lineTo(x,y);
+    const y = H / 2 - buf[i] * scale * H * 0.42;
+    i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
   }
   g.stroke();
 }
 
 function draw() {
-  if (!analyzerIn) return;
+  if (!analyzer) return;
   const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
   const colorIn  = isDark ? '#5DCAA5' : '#0F6E56';
   const colorOut = isDark ? '#AFA9EC' : '#3C3489';
-  drawWave(cvsIn,  analyzerIn,  colorIn);
-  drawWave(cvsOut, analyzerOut, colorOut);
+
+  const buf = new Float32Array(analyzer.fftSize);
+  analyzer.getFloatTimeDomainData(buf);
+
+  drawWave(cvsIn,  buf,  1,            colorIn);
+  drawWave(cvsOut, buf, -currentGain,  colorOut);
+
   rafId = requestAnimationFrame(draw);
 }
 
-clearCanvas(cvsIn);
-clearCanvas(cvsOut);
+drawBaseline(cvsIn);
+drawBaseline(cvsOut);
 </script>
